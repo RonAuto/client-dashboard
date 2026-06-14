@@ -57,7 +57,7 @@ export const AdminUsersPage = () => {
     setInviteLoading(true);
     try {
       await supabaseClient.functions.invoke("invite-user", {
-        body: { email: resendTarget, role: "user" },
+        body: { email: resendTarget, role: "user", force: true },
       });
       message.success("הזמנה נשלחה מחדש");
       setResendTarget(null);

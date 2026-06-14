@@ -1,53 +1,62 @@
-import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-serve(async (req) => {
+Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders });
+    return new Response(null, { status: 204, headers: corsHeaders });
   }
 
-  try {
-    const { email, role = "user" } = await req.json();
+  const adminClient = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+  );
 
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_ANON_KEY")!,
-      { global: { headers: { Authorization: req.headers.get("Authorization")! } } }
-    );
+  const authHeader = req.headers.get("Authorization");
+  const userClient = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
+    { global: { headers: { Authorization: authHeader! } } }
+  );
 
-    const { data: isAdmin } = await supabase.rpc("is_admin");
-    if (!isAdmin) {
-      return new Response(JSON.stringify({ error: "UNAUTHORIZED" }), { status: 200, headers: corsHeaders });
-    }
-
-    const { data: status } = await supabase.rpc("get_user_invite_status", { email_input: email });
-    if (status === "registered") {
-      return new Response(JSON.stringify({ error: "ALREADY_REGISTERED" }), { status: 200, headers: corsHeaders });
-    }
-    if (status === "invited") {
-      return new Response(JSON.stringify({ error: "ALREADY_INVITED" }), { status: 200, headers: corsHeaders });
-    }
-
-    const adminClient = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-    );
-
-    const { data, error } = await adminClient.auth.admin.inviteUserByEmail(email, {
-      data: { role },
+  const { data: { user } } = await userClient.auth.getUser();
+  const { data: profile } = await adminClient
+    .from("profiles").select("role").eq("id", user?.id ?? "").single();
+  if (profile?.role !== "admin") {
+    return new Response(JSON.stringify({ error: "UNAUTHORIZED" }), {
+      status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" }
     });
-
-    if (error) {
-      return new Response(JSON.stringify({ error: error.message }), { status: 200, headers: corsHeaders });
-    }
-
-    return new Response(JSON.stringify({ data }), { status: 200, headers: corsHeaders });
-  } catch (err) {
-    return new Response(JSON.stringify({ error: (err as Error).message }), { status: 200, headers: corsHeaders });
   }
+
+  const { email, redirectTo, force = false } = await req.json();
+
+  const { data: isRegistered } = await adminClient.rpc("check_email_registered", { email_input: email });
+  if (isRegistered) {
+    return new Response(JSON.stringify({ error: "ALREADY_REGISTERED" }), {
+      status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" }
+    });
+  }
+
+  const { data: inviteStatus } = await adminClient.rpc("get_user_invite_status", { email_input: email });
+  if (inviteStatus === "invited" && !force) {
+    return new Response(JSON.stringify({ error: "ALREADY_INVITED" }), {
+      status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" }
+    });
+  }
+
+  const inviteRedirectTo = redirectTo ?? `https://client-dashboard-lime.vercel.app/signup`;
+  const { error } = await adminClient.auth.admin.inviteUserByEmail(email, { redirectTo: inviteRedirectTo });
+  if (error) {
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" }
+    });
+  }
+
+  return new Response(JSON.stringify({ success: true }), {
+    status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" }
+  });
 });
